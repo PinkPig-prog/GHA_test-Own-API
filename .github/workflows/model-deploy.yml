@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - "models/**"
+      - "models/**"   # trigger only when something in models/ changes
   workflow_dispatch:
 
 jobs:
@@ -15,51 +15,46 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
 
-    - name: Detect changed model directories
+    - name: Detect new or updated models
       id: detect
       run: |
-        # Get changed files under models/
-        files=$(git diff --name-status ${{ github.event.before }} ${{ github.sha }} | grep '^models/' || true)
+        # get changed files between last commit and current
+        git fetch origin main
+        changed_files=$(git diff --name-status HEAD^ HEAD | grep '^models/' || true)
 
         new_models=""
         updated_models=""
 
         while read -r status file; do
-          [[ -z "$file" ]] && continue   # skip empty lines
-          model_dir=$(echo "$file" | cut -d'/' -f2)  # folder name under models/
-
+          model_dir=$(dirname "$file" | cut -d'/' -f2)  # get folder name
           if [[ "$status" == "A" ]]; then
             new_models="$new_models $model_dir"
           else
             updated_models="$updated_models $model_dir"
           fi
-        done <<< "$files"
-
-        # Remove duplicates
-        new_models=$(echo "$new_models" | xargs -n1 | sort -u | xargs)
-        updated_models=$(echo "$updated_models" | xargs -n1 | sort -u | xargs)
+        done <<< "$changed_files"
 
         echo "new_models=$new_models" >> $GITHUB_OUTPUT
         echo "updated_models=$updated_models" >> $GITHUB_OUTPUT
 
-    - name: Register new models via API
+    - name: Register new models
       if: steps.detect.outputs.new_models != ''
       run: |
         for model in ${{ steps.detect.outputs.new_models }}; do
-          echo "Registering new model: $model"
-          curl -s -w "\nStatus: %{http_code}\n" -o - \
-            -X POST "http://127.0.0.1:8000.com/register-model" \
+          echo "Registering model: $model"
+          curl -X POST "https://48399197-d109-447f-a562-0efddbd1a346.mock.pstmn.io/register" \
             -H "Content-Type: application/json" \
             -d "{\"model_name\": \"$model\"}"
+          echo "" # newline for readability
         done
 
-    - name: Update existing models via API
+    - name: Update existing models
       if: steps.detect.outputs.updated_models != ''
       run: |
         for model in ${{ steps.detect.outputs.updated_models }}; do
           echo "Updating model: $model"
-          curl -s -w "\nStatus: %{http_code}\n" -o - \
-            -X POST "http://127.0.0.1:8000.com/update-model" \
+          curl -X POST "https://48399197-d109-447f-a562-0efddbd1a346.mock.pstmn.io/update" \
             -H "Content-Type: application/json" \
-            -d "{\"model_name\": \"$model\"}"
+            -d "{\"model_name\": \"$model\", \"version\": \"v1.1\", \"changes\": \"Updated weights\"}"
+          echo ""
         done
