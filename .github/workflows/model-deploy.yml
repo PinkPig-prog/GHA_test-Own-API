@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - "models/**"   # only trigger when something inside models/ changes
+      - "models/**"
   workflow_dispatch:
 
 jobs:
@@ -25,7 +25,8 @@ jobs:
         updated_models=""
 
         while read -r status file; do
-          model_dir=$(dirname "$file" | cut -d'/' -f2)  # extract folder name under models/
+          [[ -z "$file" ]] && continue   # skip empty lines
+          model_dir=$(echo "$file" | cut -d'/' -f2)  # folder name under models/
 
           if [[ "$status" == "A" ]]; then
             new_models="$new_models $model_dir"
@@ -33,6 +34,10 @@ jobs:
             updated_models="$updated_models $model_dir"
           fi
         done <<< "$files"
+
+        # Remove duplicates
+        new_models=$(echo "$new_models" | xargs -n1 | sort -u | xargs)
+        updated_models=$(echo "$updated_models" | xargs -n1 | sort -u | xargs)
 
         echo "new_models=$new_models" >> $GITHUB_OUTPUT
         echo "updated_models=$updated_models" >> $GITHUB_OUTPUT
@@ -42,7 +47,8 @@ jobs:
       run: |
         for model in ${{ steps.detect.outputs.new_models }}; do
           echo "Registering new model: $model"
-          curl -X POST "https://your-api-server.com/register-model" \
+          curl -s -w "\nStatus: %{http_code}\n" -o - \
+            -X POST "http://127.0.0.1:8000.com/register-model" \
             -H "Content-Type: application/json" \
             -d "{\"model_name\": \"$model\"}"
         done
@@ -52,7 +58,8 @@ jobs:
       run: |
         for model in ${{ steps.detect.outputs.updated_models }}; do
           echo "Updating model: $model"
-          curl -X POST "https://your-api-server.com/update-model" \
+          curl -s -w "\nStatus: %{http_code}\n" -o - \
+            -X POST "http://127.0.0.1:8000.com/update-model" \
             -H "Content-Type: application/json" \
             -d "{\"model_name\": \"$model\"}"
         done
