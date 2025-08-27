@@ -18,30 +18,27 @@ jobs:
     - name: Detect new or updated models
       id: detect
       run: |
-        git fetch --unshallow || true   # ensure full history
-        git fetch origin main
-    
-        # Get changed files between previous commit and HEAD
-        changed_files=$(git diff --name-status HEAD~1 HEAD | grep '^models/' || true)
+        # Get all files under models/
+        all_files=$(git ls-files models/ || true)
     
         new_models=""
         updated_models=""
     
-        while read -r status file; do
+        for file in $all_files; do
           model_dir=$(echo "$file" | sed -E 's|models/([^/]+)/.*|\1|')
           [ -z "$model_dir" ] && continue
-          if [[ "$status" == "A" ]]; then
-            new_models="$new_models $model_dir"
-          elif [[ "$status" == "M" ]]; then
-            updated_models="$updated_models $model_dir"
-          fi
-        done <<< "$changed_files"
     
-        new_models=$(echo $new_models)
-        updated_models=$(echo $updated_models)
+          # For demo, treat everything as new
+          new_models="$new_models $model_dir"
+        done
+    
+        # Deduplicate
+        new_models=$(echo $new_models | tr ' ' '\n' | sort -u | tr '\n' ' ')
+        updated_models=""  # leave empty for simplicity
     
         echo "new_models=$new_models" >> $GITHUB_OUTPUT
         echo "updated_models=$updated_models" >> $GITHUB_OUTPUT
+
 
     - name: Register new models
       if: steps.detect.outputs.new_models != ''
