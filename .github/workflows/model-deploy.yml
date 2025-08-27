@@ -4,8 +4,8 @@ on:
   push:
     branches: [ main ]
     paths:
-      - "models/**"   # trigger only when something in models/ changes
-  workflow_dispatch:
+      - "models/**"   # Trigger only when something inside models/ changes
+  workflow_dispatch:   # Allow manual triggering for testing
 
 jobs:
   deploy-model:
@@ -15,28 +15,39 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
       with:
-        fetch-depth: 0  # ensures full history so git ls-tree works
+        fetch-depth: 0  # Ensure full git history
 
     - name: Detect new or updated models
       id: detect
       run: |
-        # Get folders under models/ in remote main branch
-        existing_models=$(git ls-tree --name-only -d origin/main:models || true)
+        # Ensure main branch exists locally
+        git fetch origin main
+
+        # List existing model folders in main branch
+        existing_models=$(git ls-tree -d origin/main models | awk '{print $4}')
+
+        # Get changed files under models/ in the last commit
+        changed_files=$(git diff --name-status origin/main...HEAD -- models/ || true)
 
         new_models=""
         updated_models=""
 
-        # Loop through local folders in models/
-        for dir in models/*; do
-          [ -d "$dir" ] || continue
-          model=$(basename "$dir")
+        # Process each changed file
+        while IFS= read -r line; do
+          status=$(echo "$line" | cut -f1)
+          file_path=$(echo "$line"   | cut -f2)
+          model=$(echo "$file_path" | cut -d'/' -f2)  # Extract model folder name
 
-          if echo "$existing_models" | grep -q "^$model$"; then
-            updated_models="$updated_models $model"
-          else
+          # Skip empty
+          [ -z "$model" ] && continue
+
+          # Decide if new or updated
+          if [[ ! " $existing_models " =~ " $model " ]]; then
             new_models="$new_models $model"
+          else
+            updated_models="$updated_models $model"
           fi
-        done
+        done <<< "$changed_files"
 
         # Deduplicate
         new_models=$(echo $new_models | tr ' ' '\n' | sort -u | tr '\n' ' ')
@@ -44,6 +55,7 @@ jobs:
 
         echo "new_models=$new_models" >> $GITHUB_OUTPUT
         echo "updated_models=$updated_models" >> $GITHUB_OUTPUT
+
         echo "Detected new models: $new_models"
         echo "Detected updated models: $updated_models"
 
@@ -56,6 +68,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"model_name\": \"$model\"}")
           echo "Response: $response"
+          echo ""
         done
 
     - name: Update existing models
@@ -67,4 +80,5 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"model_name\": \"$model\", \"version\": \"v1.1\", \"changes\": \"Updated weights\"}")
           echo "Response: $response"
+          echo ""
         done
