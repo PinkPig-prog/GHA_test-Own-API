@@ -4,8 +4,8 @@ on:
   push:
     branches: [ main ]
     paths:
-      - "models/**"   # Trigger only when something inside models/ changes
-  workflow_dispatch:   # Allow manual triggering for testing
+      - "models/**"
+  workflow_dispatch:
 
 jobs:
   deploy-model:
@@ -13,72 +13,212 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # Ensure full git history
+        fetch-depth: 2  # We need at least 2 commits to compare
 
-    - name: Detect new or updated models
+    - name: Detect new and updated models
       id: detect
       run: |
-        # Ensure main branch exists locally
-        git fetch origin main
-
-        # List existing model folders in main branch
-        existing_models=$(git ls-tree -d origin/main models | awk '{print $4}')
-
-        # Get changed files under models/ in the last commit
-        changed_files=$(git diff --name-status origin/main...HEAD -- models/ || true)
-
+        echo "=== Detecting model changes ==="
+        
+        # Get the previous commit hash
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          # For manual dispatch, compare with HEAD~1
+          PREV_COMMIT="HEAD~1"
+        else
+          # For push events, use the before commit
+          PREV_COMMIT="${{ github.event.before }}"
+        fi
+        
+        echo "Comparing against commit: $PREV_COMMIT"
+        
+        # Initialize arrays
         new_models=""
         updated_models=""
-
-        # Process each changed file
-        while IFS= read -r line; do
-          status=$(echo "$line" | cut -f1)
-          file_path=$(echo "$line"   | cut -f2)
-          model=$(echo "$file_path" | cut -d'/' -f2)  # Extract model folder name
-
-          # Skip empty
-          [ -z "$model" ] && continue
-
-          # Decide if new or updated
-          if [[ ! " $existing_models " =~ " $model " ]]; then
+        
+        # Get list of current model directories
+        current_models=""
+        if [ -d "models" ]; then
+          for dir in models/*/; do
+            if [ -d "$dir" ]; then
+              model=$(basename "$dir")
+              current_models="$current_models $model"
+            fi
+          done
+        fi
+        
+        echo "Current models: $current_models"
+        
+        # Get list of previous model directories
+        previous_models=""
+        if git cat-file -e $PREV_COMMIT:models 2>/dev/null; then
+          previous_models=$(git ls-tree -d $PREV_COMMIT:models 2>/dev/null | awk '{print $4}' | sed 's|models/||g' || true)
+        fi
+        
+        echo "Previous models: $previous_models"
+        
+        # Detect new models (exist now but didn't exist before)
+        for model in $current_models; do
+          if [[ ! " $previous_models " =~ " $model " ]]; then
             new_models="$new_models $model"
-          else
-            updated_models="$updated_models $model"
           fi
-        done <<< "$changed_files"
-
-        # Deduplicate
-        new_models=$(echo $new_models | tr ' ' '\n' | sort -u | tr '\n' ' ')
-        updated_models=$(echo $updated_models | tr ' ' '\n' | sort -u | tr '\n' ' ')
-
+        done
+        
+        # Detect updated models (existed before and still exist, but have changes)
+        for model in $current_models; do
+          if [[ " $previous_models " =~ " $model " ]]; then
+            # Check if there are any changes in this model directory
+            if git diff --name-only $PREV_COMMIT HEAD -- "models/$model/" | head -1 | grep -q .; then
+              updated_models="$updated_models $model"
+            fi
+          fi
+        done
+        
+        # Clean up and deduplicate
+        new_models=$(echo $new_models | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//')
+        updated_models=$(echo $updated_models | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//')
+        
+        echo "=== Results ==="
+        echo "New models: [$new_models]"
+        echo "Updated models: [$updated_models]"
+        
+        # Set outputs
         echo "new_models=$new_models" >> $GITHUB_OUTPUT
         echo "updated_models=$updated_models" >> $GITHUB_OUTPUT
-
-        echo "Detected new models: $new_models"
-        echo "Detected updated models: $updated_models"
+        
+        # Set environment variables for easier access in next steps
+        echo "NEW_MODELS=$new_models" >> $GITHUB_ENV
+        echo "UPDATED_MODELS=$updated_models" >> $GITHUB_ENV
 
     - name: Register new models
-      if: steps.detect.outputs.new_models != ''
+      if: env.NEW_MODELS != ''
       run: |
-        for model in ${{ steps.detect.outputs.new_models }}; do
-          echo "Registering model: $model"
-          response=$(curl -s -X POST "https://48399197-d109-447f-a562-0efddbd1a346.mock.pstmn.io/register" \
-            -H "Content-Type: application/json" \
-            -d "{\"model_name\": \"$model\"}")
-          echo "Response: $response"
-          echo ""
+        echo "=== Registering new models ==="
+        IFS=' ' read -ra MODELS <<< "$NEW_MODELS"
+        for model in "${MODELS[@]}"; do
+          if [ -n "$model" ]; then
+            echo "Registering new model: $model"
+            
+            # Get model metadata if available
+            metadata_file="models/$model/metadata.json"
+            if [ -f "$metadata_file" ]; then
+              echo "Found metadata file for $model"
+              metadata=$(cat "$metadata_file")
+            else
+              echo "No metadata file found for $model, using defaults"
+              metadata="{\"description\": \"Auto-registered model\", \"version\": \"1.0.0\"}"
+            fi
+            
+            # Register the model
+            response=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://48399197-d109-447f-a562-0efddbd1a346.mock.pstmn.io/register" \
+              -H "Content-Type: application/json" \
+              -H "X-Model-Source: github-actions" \
+              -d "{
+                \"model_name\": \"$model\",
+                \"metadata\": $metadata,
+                \"commit_sha\": \"${{ github.sha }}\",
+                \"repository\": \"${{ github.repository }}\",
+                \"branch\": \"${{ github.ref_name }}\"
+              }")
+            
+            http_code=$(echo "$response" | tail -n1)
+            response_body=$(echo "$response" | head -n -1)
+            
+            echo "HTTP Status: $http_code"
+            echo "Response: $response_body"
+            
+            if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+              echo "✅ Successfully registered model: $model"
+            else
+              echo "❌ Failed to register model: $model (HTTP $http_code)"
+              echo "::error::Failed to register model $model"
+            fi
+            
+            echo "---"
+          fi
         done
 
     - name: Update existing models
-      if: steps.detect.outputs.updated_models != ''
+      if: env.UPDATED_MODELS != ''
       run: |
-        for model in ${{ steps.detect.outputs.updated_models }}; do
-          echo "Updating model: $model"
-          response=$(curl -s -X POST "https://48399197-d109-447f-a562-0efddbd1a346.mock.pstmn.io/update" \
-            -H "Content-Type: application/json" \
-            -d "{\"model_name\": \"$model\", \"version\": \"v1.1\", \"changes\": \"Updated weights\"}")
-          echo "Response: $response"
-          echo ""
+        echo "=== Updating existing models ==="
+        IFS=' ' read -ra MODELS <<< "$UPDATED_MODELS"
+        for model in "${MODELS[@]}"; do
+          if [ -n "$model" ]; then
+            echo "Updating existing model: $model"
+            
+            # Get changed files for this model
+            changed_files=$(git diff --name-only ${{ github.event.before }} HEAD -- "models/$model/" | tr '\n' ',' | sed 's/,$//')
+            
+            # Get model version if available
+            version_file="models/$model/version.txt"
+            if [ -f "$version_file" ]; then
+              version=$(cat "$version_file" | tr -d '\n\r')
+            else
+              # Generate version based on commit
+              version="1.0.$(git rev-list --count HEAD -- models/$model/)"
+            fi
+            
+            # Get model metadata if available
+            metadata_file="models/$model/metadata.json"
+            if [ -f "$metadata_file" ]; then
+              echo "Found metadata file for $model"
+              metadata=$(cat "$metadata_file")
+            else
+              echo "No metadata file found for $model, using defaults"
+              metadata="{\"description\": \"Auto-updated model\"}"
+            fi
+            
+            # Update the model
+            response=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://48399197-d109-447f-a562-0efddbd1a346.mock.pstmn.io/update" \
+              -H "Content-Type: application/json" \
+              -H "X-Model-Source: github-actions" \
+              -d "{
+                \"model_name\": \"$model\",
+                \"version\": \"$version\",
+                \"changes\": \"Updated files: $changed_files\",
+                \"metadata\": $metadata,
+                \"commit_sha\": \"${{ github.sha }}\",
+                \"repository\": \"${{ github.repository }}\",
+                \"branch\": \"${{ github.ref_name }}\",
+                \"changed_files\": \"$changed_files\"
+              }")
+            
+            http_code=$(echo "$response" | tail -n1)
+            response_body=$(echo "$response" | head -n -1)
+            
+            echo "HTTP Status: $http_code"
+            echo "Response: $response_body"
+            
+            if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+              echo "✅ Successfully updated model: $model (version $version)"
+            else
+              echo "❌ Failed to update model: $model (HTTP $http_code)"
+              echo "::error::Failed to update model $model"
+            fi
+            
+            echo "---"
+          fi
         done
+
+    - name: Summary
+      if: always()
+      run: |
+        echo "=== Deployment Summary ==="
+        echo "Commit: ${{ github.sha }}"
+        echo "Repository: ${{ github.repository }}"
+        echo "Branch: ${{ github.ref_name }}"
+        echo ""
+        if [ -n "$NEW_MODELS" ]; then
+          echo "🆕 New models registered: $NEW_MODELS"
+        else
+          echo "🆕 No new models found"
+        fi
+        if [ -n "$UPDATED_MODELS" ]; then
+          echo "🔄 Existing models updated: $UPDATED_MODELS"
+        else
+          echo "🔄 No existing models updated"
+        fi
