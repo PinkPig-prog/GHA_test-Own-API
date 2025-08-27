@@ -1,0 +1,58 @@
+name: Model Deployment Automation
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "models/**"   # only trigger when something inside models/ changes
+  workflow_dispatch:
+
+jobs:
+  deploy-model:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Detect changed model directories
+      id: detect
+      run: |
+        # Get changed files under models/
+        files=$(git diff --name-status ${{ github.event.before }} ${{ github.sha }} | grep '^models/' || true)
+
+        new_models=""
+        updated_models=""
+
+        while read -r status file; do
+          model_dir=$(dirname "$file" | cut -d'/' -f2)  # extract folder name under models/
+
+          if [[ "$status" == "A" ]]; then
+            new_models="$new_models $model_dir"
+          else
+            updated_models="$updated_models $model_dir"
+          fi
+        done <<< "$files"
+
+        echo "new_models=$new_models" >> $GITHUB_OUTPUT
+        echo "updated_models=$updated_models" >> $GITHUB_OUTPUT
+
+    - name: Register new models via API
+      if: steps.detect.outputs.new_models != ''
+      run: |
+        for model in ${{ steps.detect.outputs.new_models }}; do
+          echo "Registering new model: $model"
+          curl -X POST "https://your-api-server.com/register-model" \
+            -H "Content-Type: application/json" \
+            -d "{\"model_name\": \"$model\"}"
+        done
+
+    - name: Update existing models via API
+      if: steps.detect.outputs.updated_models != ''
+      run: |
+        for model in ${{ steps.detect.outputs.updated_models }}; do
+          echo "Updating model: $model"
+          curl -X POST "https://your-api-server.com/update-model" \
+            -H "Content-Type: application/json" \
+            -d "{\"model_name\": \"$model\"}"
+        done
