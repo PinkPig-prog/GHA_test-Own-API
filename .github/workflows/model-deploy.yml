@@ -24,8 +24,10 @@ jobs:
         
         # Get the previous commit hash
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          # For manual dispatch, compare with HEAD~1
           PREV_COMMIT="HEAD~1"
         else
+          # For push events, use the before commit
           PREV_COMMIT="${{ github.event.before }}"
         fi
         
@@ -35,69 +37,40 @@ jobs:
         new_models=""
         updated_models=""
         
-        # Get current models (both files and directories)
+        # Get list of current model directories
         current_models=""
         if [ -d "models" ]; then
-          # Add directories
           for dir in models/*/; do
             if [ -d "$dir" ]; then
               model=$(basename "$dir")
               current_models="$current_models $model"
             fi
           done
-          
-          # Add individual files (treat filename without extension as model name)
-          for file in models/*; do
-            if [ -f "$file" ] && [[ ! "$file" =~ /.*/.* ]]; then
-              # Get filename without extension
-              model=$(basename "$file" | sed 's/\.[^.]*$//')
-              current_models="$current_models $model"
-            fi
-          done
-        fi
-        
-        # Get previous models (both files and directories)  
-        previous_models=""
-        if git cat-file -e $PREV_COMMIT:models 2>/dev/null; then
-          # Previous directories
-          previous_dirs=$(git ls-tree -d $PREV_COMMIT:models 2>/dev/null | awk '{print $4}' | sed 's|models/||g' || true)
-          previous_models="$previous_dirs"
-          
-          # Previous files
-          previous_files=$(git ls-tree $PREV_COMMIT:models 2>/dev/null | grep -v '^040000' | awk '{print $4}' | sed 's|models/||g' | sed 's/\.[^.]*$//' || true)
-          previous_models="$previous_models $previous_files"
         fi
         
         echo "Current models: $current_models"
+        
+        # Get list of previous model directories
+        previous_models=""
+        if git cat-file -e $PREV_COMMIT:models 2>/dev/null; then
+          previous_models=$(git ls-tree -d $PREV_COMMIT:models 2>/dev/null | awk '{print $4}' | sed 's|models/||g' || true)
+        fi
+        
         echo "Previous models: $previous_models"
         
-        # Detect new models
+        # Detect new models (exist now but didn't exist before)
         for model in $current_models; do
           if [[ ! " $previous_models " =~ " $model " ]]; then
             new_models="$new_models $model"
           fi
         done
         
-        # Detect updated models
+        # Detect updated models (existed before and still exist, but have changes)
         for model in $current_models; do
           if [[ " $previous_models " =~ " $model " ]]; then
-            # Check for changes in model directory OR model file
-            model_path="models/$model"
-            if [ -d "$model_path" ]; then
-              # It's a directory
-              if git diff --name-only $PREV_COMMIT HEAD -- "$model_path/" | head -1 | grep -q .; then
-                updated_models="$updated_models $model"
-              fi
-            else
-              # It's a file - check for file with any extension
-              for file in models/$model.*; do
-                if [ -f "$file" ]; then
-                  if git diff --name-only $PREV_COMMIT HEAD -- "$file" | head -1 | grep -q .; then
-                    updated_models="$updated_models $model"
-                    break
-                  fi
-                fi
-              done
+            # Check if there are any changes in this model directory
+            if git diff --name-only $PREV_COMMIT HEAD -- "models/$model/" | head -1 | grep -q .; then
+              updated_models="$updated_models $model"
             fi
           fi
         done
@@ -110,8 +83,11 @@ jobs:
         echo "New models: [$new_models]"
         echo "Updated models: [$updated_models]"
         
+        # Set outputs
         echo "new_models=$new_models" >> $GITHUB_OUTPUT
         echo "updated_models=$updated_models" >> $GITHUB_OUTPUT
+        
+        # Set environment variables for easier access in next steps
         echo "NEW_MODELS=$new_models" >> $GITHUB_ENV
         echo "UPDATED_MODELS=$updated_models" >> $GITHUB_ENV
 
