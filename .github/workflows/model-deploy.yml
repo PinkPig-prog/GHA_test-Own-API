@@ -14,41 +14,48 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # ensures full history so git ls-tree works
 
     - name: Detect new or updated models
       id: detect
       run: |
-        # Get all folders under models/
+        # Get folders under models/ in remote main branch
+        existing_models=$(git ls-tree --name-only -d origin/main:models || true)
+
+        new_models=""
+        updated_models=""
+
+        # Loop through local folders in models/
         for dir in models/*; do
           [ -d "$dir" ] || continue
           model=$(basename "$dir")
-    
-          # Check if folder existed in previous commit (main branch)
-          if git ls-tree --name-only origin/main | grep -q "^$dir$"; then
+
+          if echo "$existing_models" | grep -q "^$model$"; then
             updated_models="$updated_models $model"
           else
             new_models="$new_models $model"
           fi
         done
-    
+
         # Deduplicate
         new_models=$(echo $new_models | tr ' ' '\n' | sort -u | tr '\n' ' ')
         updated_models=$(echo $updated_models | tr ' ' '\n' | sort -u | tr '\n' ' ')
-    
+
         echo "new_models=$new_models" >> $GITHUB_OUTPUT
         echo "updated_models=$updated_models" >> $GITHUB_OUTPUT
-    
-
+        echo "Detected new models: $new_models"
+        echo "Detected updated models: $updated_models"
 
     - name: Register new models
       if: steps.detect.outputs.new_models != ''
       run: |
         for model in ${{ steps.detect.outputs.new_models }}; do
           echo "Registering model: $model"
-          curl -X POST "https://48399197-d109-447f-a562-0efddbd1a346.mock.pstmn.io/register" \
+          response=$(curl -s -X POST "https://48399197-d109-447f-a562-0efddbd1a346.mock.pstmn.io/register" \
             -H "Content-Type: application/json" \
-            -d "{\"model_name\": \"$model\"}"
-          echo "" # newline for readability
+            -d "{\"model_name\": \"$model\"}")
+          echo "Response: $response"
         done
 
     - name: Update existing models
@@ -56,8 +63,8 @@ jobs:
       run: |
         for model in ${{ steps.detect.outputs.updated_models }}; do
           echo "Updating model: $model"
-          curl -X POST "https://48399197-d109-447f-a562-0efddbd1a346.mock.pstmn.io/update" \
+          response=$(curl -s -X POST "https://48399197-d109-447f-a562-0efddbd1a346.mock.pstmn.io/update" \
             -H "Content-Type: application/json" \
-            -d "{\"model_name\": \"$model\", \"version\": \"v1.1\", \"changes\": \"Updated weights\"}"
-          echo ""
+            -d "{\"model_name\": \"$model\", \"version\": \"v1.1\", \"changes\": \"Updated weights\"}")
+          echo "Response: $response"
         done
